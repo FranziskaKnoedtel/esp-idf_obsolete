@@ -119,8 +119,12 @@ void tud_network_init_cb(void)
   for(uint8_t idx = 0; idx < FRAME_BUFFER_SIZE; idx++) {
     if(rx_frame_buffer.frame[idx] != NULL) {
       pbuf_free(rx_frame_buffer.frame[idx]);
+      rx_frame_buffer.frame[idx] = NULL;
     }
   }
+
+  rx_frame_buffer.write_idx = 0;
+  rx_frame_buffer.read_idx = 0;
 }
 
 static err_t netif_init_cb(struct netif *netif)
@@ -155,7 +159,7 @@ void netif_status_cb(struct netif *netif)
 esp_err_t tusb_ethernet_over_usb_init(tinyusb_config_ethernet_over_usb_t cfg)
 {
   struct netif *netif = &netif_data;
-  char mac_str[17];
+  char mac_str[18];
   const ip_addr_t empty_ipaddr = IPADDR4_INIT_BYTES(0, 0, 0, 0);
 
   /* initialize tcp ip stack */
@@ -172,12 +176,13 @@ esp_err_t tusb_ethernet_over_usb_init(tinyusb_config_ethernet_over_usb_t cfg)
   for(int i = 0; i < 6; i++) {
     snprintf(mac_str + (i*3), 4,"%02x%s", cfg.mac_address[i], i<5 ? ":" : "");
   }
-  ESP_LOGI(TAG,"Host NIC MAC Address: %s", mac_str);
+  ESP_LOGI(TAG, "Host NIC MAC Address: %s", mac_str);
 
   netif = netif_add(netif, &(cfg.ipaddr), &(cfg.netmask), &(cfg.gateway), NULL, netif_init_cb, ip_input);
   netif_set_default(netif);
   netif_set_status_callback(netif, netif_status_cb);
   if(!netif_is_up(&netif_data)) {
+    ESP_LOGE(TAG, "Netif did not become up.");
     return ESP_FAIL;
   }
 
@@ -190,6 +195,7 @@ esp_err_t tusb_ethernet_over_usb_init(tinyusb_config_ethernet_over_usb_t cfg)
   /* create receive event */
   rx_event = xSemaphoreCreateBinary();
   if(rx_event == NULL) {
+    ESP_LOGE(TAG, "Could not create semaphore.");
     return ESP_FAIL;
   }
 
@@ -203,6 +209,7 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
   /* check if buffer run full */
   if(rx_frame_buffer.frame[rx_frame_buffer.write_idx] != NULL) {
     /* signal the inability to accept it */
+    ESP_LOGW(TAG, "Not able to accept packet! - Buffer full!");
     return false;
   }
 
@@ -210,8 +217,23 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
     struct pbuf *p = pbuf_alloc(PBUF_RAW, size, PBUF_POOL);
 
     if (p) {
-      /* pbuf_alloc() has already initialized struct; all we need to do is copy the data */
-      memcpy(p->payload, src, size);
+      struct pbuf *q;
+      uint8_t *data = (uint8_t *)src;
+      uint16_t copied = 0;
+
+      for(q = p; q != NULL; q = q->next)
+      {
+        if(size - copied > q->len) {
+          memcpy(q->payload, data, q->len);
+        }
+        else {
+          memcpy(q->payload, data, size - copied);
+          break;
+        }
+
+        copied += q->len;
+        data += q->len;
+      }
 
       /* store away the pointer for service_traffic() to later handle */
       rx_frame_buffer.frame[rx_frame_buffer.write_idx] = p;
