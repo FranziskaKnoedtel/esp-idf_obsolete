@@ -220,23 +220,29 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
       struct pbuf *q;
       uint8_t *data = (uint8_t *)src;
       uint16_t copied = 0;
+      uint16_t len;
 
-      for(q = p; q != NULL; q = q->next)
-      {
+      for(q = p; q != NULL && copied < size; q = q->next) {
         if(size - copied > q->len) {
-          memcpy(q->payload, data, q->len);
+          len = q->len;
         }
         else {
-          memcpy(q->payload, data, size - copied);
-          break;
+          len = size - copied;
         }
 
-        copied += q->len;
+        memcpy(q->payload, data, len);
+        copied += len;
         data += q->len;
       }
 
-      /* store away the pointer for service_traffic() to later handle */
-      rx_frame_buffer.frame[rx_frame_buffer.write_idx] = p;
+      if(copied < size) {
+        ESP_LOGW(TAG, "Not able to accept packet! - Allocated buffer too small!");
+        return false;
+      }
+      else {
+        /* store away the pointer for service_traffic() to later handle */
+        rx_frame_buffer.frame[rx_frame_buffer.write_idx] = p;
+      }
 
       rx_frame_buffer.write_idx++;
       if(rx_frame_buffer.write_idx >= FRAME_BUFFER_SIZE) {
@@ -247,6 +253,11 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
 
       /* new frame received -> set rx event */
       xSemaphoreGive(rx_event);
+    }
+    else
+    {
+      ESP_LOGW(TAG, "Not able to accept packet! - Could not allocate memory!");
+      return false;
     }
   }
 
