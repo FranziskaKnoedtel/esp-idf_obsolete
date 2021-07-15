@@ -35,6 +35,7 @@
 #include "netif/etharp.h"
 #include "tusb_cdc_ecm.h"
 #include "descriptors_control.h"
+#include "lwip/dhcp.h"
 
 const static char *TAG = "CDC-ECM Driver";
 
@@ -118,8 +119,12 @@ void tud_network_init_cb(void)
   for(uint8_t idx = 0; idx < FRAME_BUFFER_SIZE; idx++) {
     if(rx_frame_buffer.frame[idx] != NULL) {
       pbuf_free(rx_frame_buffer.frame[idx]);
+      rx_frame_buffer.frame[idx] = NULL;
     }
   }
+
+  rx_frame_buffer.write_idx = 0;
+  rx_frame_buffer.read_idx = 0;
 }
 
 static err_t netif_init_cb(struct netif *netif)
@@ -135,42 +140,68 @@ static err_t netif_init_cb(struct netif *netif)
   return ERR_OK;
 }
 
+void netif_status_cb(struct netif *netif)
+{
+  ESP_LOGI(TAG,"Internal netif status changed...");
+  ESP_LOGI(TAG,"IP-Address: %d.%d.%d.%d", ip4_addr1(&(netif->ip_addr)), ip4_addr2(&(netif->ip_addr)), ip4_addr3(&(netif->ip_addr)), ip4_addr4(&(netif->ip_addr)));
+  ESP_LOGI(TAG,"Netmask: %d.%d.%d.%d", ip4_addr1(&(netif->netmask)), ip4_addr2(&(netif->netmask)), ip4_addr3(&(netif->netmask)), ip4_addr4(&(netif->netmask)));
+  ESP_LOGI(TAG,"Gateway: %d.%d.%d.%d", ip4_addr1(&(netif->gw)), ip4_addr2(&(netif->gw)), ip4_addr3(&(netif->gw)), ip4_addr4(&(netif->gw)));
+  if(netif_is_up(netif))
+  {
+    ESP_LOGI(TAG,"Link is up.");
+  }
+  else
+  {
+    ESP_LOGI(TAG,"Link is down.");
+  }
+}
+
 esp_err_t tusb_ethernet_over_usb_init(tinyusb_config_ethernet_over_usb_t cfg)
 {
-    struct netif *netif = &netif_data;
-    char mac_str[17];
+  struct netif *netif = &netif_data;
+  char mac_str[18];
+  const ip_addr_t empty_ipaddr = IPADDR4_INIT_BYTES(0, 0, 0, 0);
 
-    /* initialize tcp ip stack */
-    tcpip_init(NULL, NULL);
+  /* initialize tcp ip stack */
+  tcpip_init(NULL, NULL);
 
-    /* the lwip virtual MAC address must be different from the host's; to ensure this, we toggle the LSbit */
-    netif->hwaddr_len = sizeof(cfg.mac_address);
-    memcpy(netif->hwaddr, cfg.mac_address, sizeof(cfg.mac_address));
-    netif->hwaddr[5] ^= 0x01;
-    /* set host MAC address */
-    tusb_set_mac_address(cfg.mac_address);
+  /* the lwip virtual MAC address must be different from the host's; to ensure this, we toggle the LSbit */
+  netif->hwaddr_len = sizeof(cfg.mac_address);
+  memcpy(netif->hwaddr, cfg.mac_address, sizeof(cfg.mac_address));
+  netif->hwaddr[5] ^= 0x01;
+  /* set host MAC address */
+  tusb_set_mac_address(cfg.mac_address);
     
-    /* print host MAC address */
-    for(int i = 0; i < 6; i++) {
-      snprintf(mac_str + (i*3), 4,"%02x%s", cfg.mac_address[i], i<5 ? ":" : "");
-    }
-    ESP_LOGI(TAG,"Host NIC MAC Address: %s", mac_str);
+  /* print host MAC address */
+  for(int i = 0; i < 6; i++) {
+    snprintf(mac_str + (i*3), 4,"%02x%s", cfg.mac_address[i], i<5 ? ":" : "");
+  }
+  ESP_LOGI(TAG, "Host NIC MAC Address: %s", mac_str);
 
-    netif = netif_add(netif, &(cfg.ipaddr), &(cfg.netmask), &(cfg.gateway), NULL, netif_init_cb, ip_input);
-    netif_set_default(netif);
-    if(!netif_is_up(&netif_data)) {
-      return ESP_FAIL;
-    }
+  netif = netif_add(netif, &(cfg.ipaddr), &(cfg.netmask), &(cfg.gateway), NULL, netif_init_cb, ip_input);
+  netif_set_default(netif);
+  netif_set_status_callback(netif, netif_status_cb);
+  if(!netif_is_up(&netif_data)) {
+    ESP_LOGE(TAG, "Netif did not become up.");
+    return ESP_FAIL;
+  }
 
-    /* create receive event */
-    rx_event = xSemaphoreCreateBinary();
-    if(rx_event == NULL) {
-      return ESP_FAIL;
-    }
+  /* if ip address was preset with 0.0.0.0, start dhcp client */
+  if(memcmp(&cfg.ipaddr, &empty_ipaddr, sizeof(cfg.ipaddr)) == 0)
+  {
+    dhcp_start(netif);
+  }
 
-    xTaskCreate( service_traffic_task, "service_traffic", 4096, NULL, 6, NULL);
+  /* create receive event */
+  rx_event = xSemaphoreCreateBinary();
+  if(rx_event == NULL) {
+    ESP_LOGE(TAG, "Could not create semaphore.");
+    return ESP_FAIL;
+  }
 
-    return ESP_OK;
+  xTaskCreate( service_traffic_task, "service_traffic", 4096, NULL, 6, NULL);
+
+  return ESP_OK;
 }
 
 bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
@@ -178,6 +209,7 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
   /* check if buffer run full */
   if(rx_frame_buffer.frame[rx_frame_buffer.write_idx] != NULL) {
     /* signal the inability to accept it */
+    ESP_LOGW(TAG, "Not able to accept packet! - Buffer full!");
     return false;
   }
 
@@ -185,11 +217,32 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
     struct pbuf *p = pbuf_alloc(PBUF_RAW, size, PBUF_POOL);
 
     if (p) {
-      /* pbuf_alloc() has already initialized struct; all we need to do is copy the data */
-      memcpy(p->payload, src, size);
+      struct pbuf *q;
+      uint8_t *data = (uint8_t *)src;
+      uint16_t copied = 0;
+      uint16_t len;
 
-      /* store away the pointer for service_traffic() to later handle */
-      rx_frame_buffer.frame[rx_frame_buffer.write_idx] = p;
+      for(q = p; q != NULL && copied < size; q = q->next) {
+        if(size - copied > q->len) {
+          len = q->len;
+        }
+        else {
+          len = size - copied;
+        }
+
+        memcpy(q->payload, data, len);
+        copied += len;
+        data += q->len;
+      }
+
+      if(copied < size) {
+        ESP_LOGW(TAG, "Not able to accept packet! - Allocated buffer too small!");
+        return false;
+      }
+      else {
+        /* store away the pointer for service_traffic() to later handle */
+        rx_frame_buffer.frame[rx_frame_buffer.write_idx] = p;
+      }
 
       rx_frame_buffer.write_idx++;
       if(rx_frame_buffer.write_idx >= FRAME_BUFFER_SIZE) {
@@ -200,6 +253,11 @@ bool tud_network_recv_cb(const uint8_t *src, uint16_t size)
 
       /* new frame received -> set rx event */
       xSemaphoreGive(rx_event);
+    }
+    else
+    {
+      ESP_LOGW(TAG, "Not able to accept packet! - Could not allocate memory!");
+      return false;
     }
   }
 

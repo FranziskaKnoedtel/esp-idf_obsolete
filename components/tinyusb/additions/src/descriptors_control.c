@@ -48,9 +48,6 @@ uint8_t const desc_hid_report[] = {
 };
 #endif
 
-//#define ALT_CONFIG_TOTAL_LEN     (TUD_CONFIG_DESC_LEN + TUD_CDC_ECM_DESC_LEN)
-#define MAIN_CONFIG_TOTAL_LEN    (TUD_CONFIG_DESC_LEN + TUD_RNDIS_DESC_LEN)
-
 uint8_t const desc_configuration[] = {
     // interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(2, ITF_NUM_TOTAL, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
