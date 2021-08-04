@@ -15,6 +15,9 @@ limitations under the License.
 #ifndef _TUSB_ETHERNET_OVER_USB_H_
 #define _TUSB_ETHERNET_OVER_USB_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     ip_addr_t ipaddr;
@@ -25,4 +28,7 @@ typedef struct {
 
 esp_err_t tusb_ethernet_over_usb_init(tinyusb_config_ethernet_over_usb_t cfg);
 
+#ifdef __cplusplus
+}
+#endif
 #endif
